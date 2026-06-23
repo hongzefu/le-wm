@@ -206,7 +206,37 @@ LeWM 由 5 个子模块组成（[jepa.py](jepa.py) 里的 `JEPA` 类），其中
 
 ---
 
-## 6. 两项损失详解
+## 6. 评估任务与 Simulator
+
+LeWM 在 **4 个连续控制任务**上做规划评估,覆盖 **2D / 3D**、**导航 / 操控 / 触达**,动作空间全部连续。这些环境都经 [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) 封装,以 **Gymnasium** 标准接口暴露——代码里 `env_name` 一律是 `swm/...`(见 [config/eval/](config/eval/))。其中 **OGBench-Cube** 与 **Reacher** 的底层物理由 **MuJoCo** 驱动([eval.py](eval.py) 顶部 `os.environ["MUJOCO_GL"] = "egl"` 即为其离屏渲染);Push-T / Two-Room 则是 2D 环境。
+
+| 任务 | 维度 / 类型 | 任务定义 | 底层 simulator / 来源 | 代码 `env_name`(配置) |
+|---|---|---|---|---|
+| **Two-Room** | 2D · 导航 | 两个房间被一堵带单门的墙隔开;agent(红点)从一室随机起点出发,**穿过门**到达另一室的随机目标位置 | Sobal et al.(PLDM)提出的轻量自定义 2D 导航环境 | `swm/TwoRoom-v1`([tworoom.yaml](config/eval/tworoom.yaml)) |
+| **Push-T** | 2D · 操控 | agent(蓝点)**只能推**,把一个 **T 形 block** 推到与目标配置对齐 | pymunk 2D 刚体物理(沿用 DINO-WM 的 PushT 环境) | `swm/PushT-v1`([pusht.yaml](config/eval/pusht.yaml)) |
+| **OGBench-Cube** | **3D** · 机械臂操控 | 带末端执行器的机械臂**抓起 cube 放到目标位置**;仅用 single-cube 变体 | **MuJoCo**;OGBench(Park et al.) | `swm/OGBCube-v0`([cube.yaml](config/eval/cube.yaml)) |
+| **Reacher** | 2D 平面 · 连续控制 | 控制**双关节机械臂**,使关节与目标配置完美对齐,以触达 2D 平面内的目标(`task: qpos_match`) | **MuJoCo**;DeepMind Control Suite | `swm/ReacherDMControl-v0`([reacher.yaml](config/eval/reacher.yaml)) |
+
+**各任务的数据集与评估预算**(数据集来自 [HuggingFace 合集](https://huggingface.co/collections/quentinll/lewm),均训练 10 epochs):
+
+| 任务 | 训练数据集 | 数据规模 / 采集策略 | eval budget | goal 采样间隔 |
+|---|---|---|---|---|
+| Two-Room | `tworoom` | 10,000 条 × 均 92 步;噪声启发式(先奔门、再奔目标) | 150 步 | 100 步后 |
+| Push-T | `pusht_expert_train` | 20,000 条专家 × 均 196 步(同 DINO-WM) | 50 步 | 25 步后 |
+| OGBench-Cube | `ogbench/cube_single_expert` | 10,000 条 × 200 步;benchmark 自带启发式 | 50 步 | 25 步后 |
+| Reacher | `dmc/reacher_random` | 10,000 条 × 200 步;Soft Actor-Critic 策略 | 50 步 | 25 步后 |
+
+**评估方式**:统一用第 5 章的 **goal-conditioned MPC** 闭环——从离线数据集随机采一条轨迹的某状态作为**初始状态**,把同一轨迹 goal 间隔步之后的状态作为**目标**(保证目标可达、与数据动力学一致),再用世界模型规划动作去逼近目标。
+
+> **几点说明**
+> - **规划(planning)实验用全部 4 个任务**(论文 Fig. 6);而**物理量探针(probing)**与**违背预期 / 意外性(surprise)实验只用 Two-Room、Push-T、OGBench-Cube 三个**。
+> - 上表 budget / goal 间隔为**论文 F.1 的设置**;仓库 [config/eval/](config/eval/) 各 yaml 的默认值统一是 `eval_budget=50`、`goal_offset_steps=25`(Two-Room 论文实际用 150 / 100,复现时需相应调大)。
+> - **单任务训练,而非 multi-task**:每个环境**各训一个独立 LeWM**([train.py](train.py) 只加载单一数据集,`python train.py data=<env>`),HuggingFace 上每环境对应一个 ckpt repo(`lewm-pusht/-cube/-tworooms/-reacher`,4 个全部可用)。论文所说的"统一"指**同一套架构 + 同一组超参**适用所有环境("we keep the hyperparameters fixed across all environments"),**而非共享一组权重**——各环境动作维不同,`action_encoder` 输入维即按该环境动作空间设定。
+> - **统一实现**:训练用 [stable-pretraining](https://github.com/galilai-group/stable-pretraining),评估用 PyTorch + Gymnasium;论文全部实验跑在**单张 NVIDIA L40S GPU** 上。
+
+---
+
+## 7. 两项损失详解
 
 LeWM 全部稳定性来自这两项（[train.py](train.py) `lejepa_forward`）：
 
@@ -232,7 +262,7 @@ pred_loss = mean( ( predict(ctx_emb, ctx_act) − tgt_emb )² )
 
 ---
 
-## 7. 代码结构
+## 8. 代码结构
 
 | 文件 | 内容 |
 |---|---|
@@ -248,7 +278,7 @@ pred_loss = mean( ( predict(ctx_emb, ctx_act) − tgt_emb )² )
 
 ---
 
-## 8. 关键超参数（默认）
+## 9. 关键超参数（默认）
 
 来自 [config/train/lewm.yaml](config/train/lewm.yaml) 与 [config/train/model/lewm.yaml](config/train/model/lewm.yaml)：
 
@@ -268,7 +298,7 @@ pred_loss = mean( ( predict(ctx_emb, ctx_act) − tgt_emb )² )
 
 ---
 
-## 9. 快速上手（详见 [README.md](README.md)）
+## 10. 快速上手（详见 [README.md](README.md)）
 
 ```bash
 # 安装
@@ -282,11 +312,11 @@ python train.py data=pusht
 python eval.py --config-name=pusht.yaml policy=pusht/lewm
 ```
 
-支持的任务：`pusht`、`cube`、`tworoom`（2D）与 `reacher`（3D，DMC）。各环境的预训练检查点见 [HuggingFace 合集](https://huggingface.co/collections/quentinll/lewm)。
+支持的任务：`tworoom`、`pusht`（2D）、`reacher`（2D 平面，DMC）与 `cube`（OGBench，**3D**）——定义与 simulator 详见前文「6. 评估任务与 Simulator」。各环境的预训练检查点见 [HuggingFace 合集](https://huggingface.co/collections/quentinll/lewm)。
 
 ---
 
-## 10. 引用
+## 11. 引用
 
 ```bibtex
 @article{maes_lelidec2026lewm,

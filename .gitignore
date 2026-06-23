@@ -1,0 +1,21 @@
+# 数据集与 checkpoint（体积大，不入库）
+/data/
+/checkpoints/
+# eval 产物（pusht_results.txt + rollout 视频，swm 写到 $STABLEWM_HOME/pusht/）
+/pusht/
+
+# Python venv 与 HuggingFace 下载缓存
+/.venv/
+/.hf_cache/
+
+# 评测产物（SLURM 日志、Hydra 输出）
+/output/
+/outputs/
+/.hydra/
+
+# 通用
+__pycache__/
+*.pyc
+*.pyo
+wandb/
+pusht_results.txt
